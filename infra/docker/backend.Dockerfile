@@ -7,7 +7,6 @@ RUN apk add --no-cache libpq && apk add --no-cache --virtual .build-deps postgre
     && docker-php-ext-install pdo_pgsql && apk del .build-deps
 WORKDIR /app
 COPY backend/ ./
-COPY database/migrations/ ./migrations/
 COPY --from=dependencies /app/vendor ./vendor
 RUN mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini"
 USER www-data

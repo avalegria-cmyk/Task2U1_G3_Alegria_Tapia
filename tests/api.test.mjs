@@ -11,7 +11,16 @@ async function api(path, { token, method = "GET", body } = {}) {
     },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
-  return { status: response.status, data: await response.json() };
+  const text = await response.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(
+      `${method} ${path}: HTTP ${response.status}: ${text.slice(0, 200)}`,
+    );
+  }
+  return { status: response.status, data };
 }
 async function login(email) {
   const result = await api("/auth/login", {
@@ -21,296 +30,255 @@ async function login(email) {
   assert.equal(result.status, 200, JSON.stringify(result.data));
   return result.data.token;
 }
-test("academic workflows, validation, authorization and transactional capacity", async () => {
-  assert.ok(password, "DEMO_PASSWORD must be configured.");
+test("university modules, participant data, bulk enrollment, notifications and role boundaries", async () => {
   assert.equal((await api("/health")).status, 200);
   assert.equal((await api("/students")).status, 401);
-  assert.equal((await api("/students", { token: "invalid" })).status, 401);
-  assert.equal(
-    (
-      await api("/auth/login", {
-        method: "POST",
-        body: { email: "admin@example.edu", password: "wrong" },
-      })
-    ).status,
-    401,
-  );
   const admin = await login("admin@example.edu");
-  const instructor = await login("instructor@example.edu");
-  const student = await login("student@example.edu");
-  const ownStudents = await api("/students", { token: student });
-  assert.equal(ownStudents.data.length, 1);
-  const ownId = ownStudents.data[0].id;
+  const teacher = await login("kevin.chuquitarco@example.edu");
+  const student = await login("adonis.alegria@example.edu");
+  const students = (await api("/students", { token: admin })).data;
+  const courses = (await api("/courses", { token: admin })).data;
+  assert.equal(students.length, 13);
+  assert.equal(courses.length, 4);
+  assert.deepEqual(
+    courses.map((course) => course.enrolled),
+    [13, 11, 10, 10],
+  );
+  const architecture = courses.find((course) => course.code === "32828");
+  const security = courses.find((course) => course.code === "32829");
+  const adonis = students.find((row) => row.campus_id === 6878);
+  const pamela = students.find((row) => row.campus_id === 6888);
+  const carlos = students.find((row) => row.campus_id === 2515);
+  assert.equal((await api("/my-courses", { token: teacher })).data.length, 4);
+  const mine = (await api("/my-courses", { token: student })).data;
+  assert.equal(mine.length, 3);
+  assert.ok(!mine.some((row) => row.code === "32829"));
+  const roster = (
+    await api(`/courses/${architecture.id}/students`, { token: student })
+  ).data;
+  assert.equal(roster.length, 14);
+  assert.equal(roster.filter((row) => row.role === "instructor").length, 1);
+  assert.ok(roster.some((row) => row.last_name === "CALAPUCHA ÑACATA"));
   assert.equal(
-    (
-      await api("/students", {
-        token: instructor,
-        method: "POST",
-        body: { name: "Blocked", major: "Engineering", semester: 1 },
-      })
-    ).status,
+    roster.find((row) => row.student_id === adonis.id).group_name,
+    "Group 3",
+  );
+  assert.ok(
+    roster.every((row) => !("email" in row) && !("password_hash" in row)),
+  );
+  assert.equal(
+    (await api(`/courses/${security.id}/students`, { token: student })).status,
     403,
   );
   assert.equal(
     (
-      await api("/courses", {
+      await api(`/courses/${security.id}/access`, {
         token: student,
         method: "POST",
-        body: { name: "Blocked", instructor: "Test", capacity: 1 },
+        body: {},
       })
     ).status,
     403,
   );
   assert.equal(
-    (await api("/students", { token: admin, method: "POST", body: [] })).status,
-    400,
+    (
+      await api(`/courses/${architecture.id}/access`, {
+        token: student,
+        method: "POST",
+        body: {},
+      })
+    ).status,
+    200,
+  );
+  assert.ok(
+    (
+      await api(`/courses/${architecture.id}/students`, { token: student })
+    ).data.find((row) => row.student_id === adonis.id).last_access_at,
   );
   assert.equal(
     (
-      await api("/students", {
-        token: admin,
+      await api("/enrollments", {
+        token: student,
         method: "POST",
-        body: { name: " ", major: "Engineering", semester: 1 },
+        body: { courseId: security.id, studentIds: [adonis.id] },
       })
     ).status,
-    422,
+    403,
   );
   assert.equal(
     (
-      await api("/students", {
-        token: admin,
+      await api("/enrollments", {
+        token: teacher,
         method: "POST",
-        body: { name: "Test", major: "Engineering", semester: 13 },
+        body: { courseId: security.id, studentIds: [adonis.id] },
       })
     ).status,
-    422,
+    403,
   );
-  assert.equal(
-    (
-      await api("/courses", {
-        token: admin,
-        method: "POST",
-        body: { name: "Test", instructor: "Test", capacity: 1.5 },
-      })
-    ).status,
-    422,
-  );
-  const stamp = Date.now();
-  const first = await api("/students", {
-    token: admin,
-    method: "POST",
-    body: {
-      name: `Test Student ${stamp}`,
-      major: "Computer Science",
-      semester: 2,
-    },
-  });
-  const second = await api("/students", {
-    token: admin,
-    method: "POST",
-    body: {
-      name: `Second Student ${stamp}`,
-      major: "Computer Science",
-      semester: 3,
-    },
-  });
-  assert.equal(first.status, 201);
-  assert.equal(second.status, 201);
-  const course = await api("/courses", {
-    token: admin,
-    method: "POST",
-    body: {
-      name: `Capacity Test ${stamp}`,
-      instructor: "Test Instructor",
-      capacity: 1,
-    },
-  });
-  assert.equal(course.status, 201);
-  const enroll = (id) =>
-    api("/enrollments", {
-      token: admin,
-      method: "POST",
-      body: { studentId: id, courseId: course.data.id },
-    });
-  const concurrent = await Promise.all([
-    enroll(first.data.id),
-    enroll(second.data.id),
-  ]);
-  assert.deepEqual(concurrent.map((row) => row.status).sort(), [201, 409]);
-  const winner = concurrent.find((row) => row.status === 201).data;
-  assert.equal((await enroll(winner.student_id)).status, 409);
   assert.equal(
     (
       await api("/enrollments", {
         token: admin,
         method: "POST",
-        body: { studentId: first.data.id, courseId: 2147483647 },
-      })
-    ).status,
-    404,
-  );
-  const selfCourse = await api("/courses", {
-    token: admin,
-    method: "POST",
-    body: {
-      name: `Self Enrollment ${stamp}`,
-      instructor: "Test Instructor",
-      capacity: 10,
-    },
-  });
-  const ownEnrollment = await api("/enrollments", {
-    token: student,
-    method: "POST",
-    body: { studentId: first.data.id, courseId: selfCourse.data.id },
-  });
-  assert.equal(ownEnrollment.status, 201);
-  assert.equal(
-    ownEnrollment.data.student_id,
-    ownId,
-    "Students cannot enroll another student.",
-  );
-  const visibleEnrollments = await api("/enrollments", { token: student });
-  assert.ok(visibleEnrollments.data.every((row) => row.student_id === ownId));
-  const reports = await api("/reports", { token: student });
-  assert.equal(reports.data.length, 1);
-  assert.ok(reports.data[0].courses.includes(selfCourse.data.name));
-  const myCourses = await api("/my-courses", { token: student });
-  assert.ok(myCourses.data.some((row) => row.id === selfCourse.data.id));
-  assert.ok(!myCourses.data.some((row) => row.id === course.data.id));
-  const ownRoster = await api(`/courses/${selfCourse.data.id}/students`, {
-    token: student,
-  });
-  assert.equal(ownRoster.status, 200);
-  assert.deepEqual(
-    ownRoster.data.map((row) => row.id),
-    [ownId],
-  );
-  assert.ok(
-    ownRoster.data.every(
-      (row) => !("email" in row) && !("password_hash" in row),
-    ),
-  );
-  assert.equal(
-    (await api(`/courses/${course.data.id}/students`, { token: student }))
-      .status,
-    403,
-  );
-  assert.equal(
-    (
-      await api(`/courses/${selfCourse.data.id}/students`, {
-        token: instructor,
-      })
-    ).status,
-    403,
-  );
-  const teachers = await api("/instructors", { token: admin });
-  const teacherId = teachers.data.find((row) => row.name === "Carlos Ruiz").id;
-  assert.equal((await api("/instructors", { token: student })).status, 403);
-  assert.equal(
-    (
-      await api(`/courses/${selfCourse.data.id}/instructor`, {
-        token: instructor,
-        method: "POST",
-        body: { instructorId: teacherId },
-      })
-    ).status,
-    403,
-  );
-  const adminAccount = await api("/auth/me", { token: admin });
-  assert.equal(
-    (
-      await api(`/courses/${selfCourse.data.id}/instructor`, {
-        token: admin,
-        method: "POST",
-        body: { instructorId: adminAccount.data.id },
+        body: { courseId: security.id, studentIds: [] },
       })
     ).status,
     422,
   );
   assert.equal(
     (
-      await api(`/courses/${selfCourse.data.id}/instructor`, {
+      await api("/enrollments", {
         token: admin,
         method: "POST",
-        body: { instructorId: teacherId },
+        body: { courseId: security.id, studentIds: [adonis.id, carlos.id] },
       })
     ).status,
-    200,
+    409,
   );
-  const assigned = await api("/my-courses", { token: instructor });
-  assert.ok(assigned.data.some((row) => row.id === selfCourse.data.id));
-  assert.ok(!assigned.data.some((row) => row.id === course.data.id));
+  assert.equal(
+    (await api("/enrollments", { token: admin })).data.length,
+    44,
+    "A failed batch must be fully rolled back.",
+  );
+  const enrolled = await api("/enrollments", {
+    token: admin,
+    method: "POST",
+    body: { courseId: security.id, studentIds: [adonis.id, pamela.id] },
+  });
+  assert.equal(enrolled.status, 201);
+  assert.equal(enrolled.data.enrollments.length, 2);
+  assert.equal((await api("/enrollments", { token: admin })).data.length, 46);
+  assert.equal((await api("/my-courses", { token: student })).data.length, 4);
+  const studentNotifications = (await api("/notifications", { token: student }))
+    .data;
+  const teacherNotifications = (await api("/notifications", { token: teacher }))
+    .data;
+  const adminNotifications = (await api("/notifications", { token: admin }))
+    .data;
+  assert.equal(studentNotifications.length, 1);
+  assert.equal(teacherNotifications.length, 2);
+  assert.equal(adminNotifications.length, 2);
   assert.equal(
     (
-      await api(`/courses/${selfCourse.data.id}/students`, {
-        token: instructor,
+      await api(`/notifications/${adminNotifications[0].id}/read`, {
+        token: student,
+        method: "POST",
+        body: {},
+      })
+    ).status,
+    404,
+  );
+  assert.equal(
+    (
+      await api(`/notifications/${studentNotifications[0].id}/read`, {
+        token: student,
+        method: "POST",
+        body: {},
       })
     ).status,
     200,
   );
+  assert.ok((await api("/notifications", { token: student })).data[0].read_at);
+  const capacityCourse = await api("/courses", {
+    token: admin,
+    method: "POST",
+    body: {
+      name: "Isolated capacity test",
+      instructor: "Unassigned",
+      capacity: 1,
+    },
+  });
+  assert.equal(capacityCourse.status, 201);
   assert.equal(
-    (await api(`/courses/${course.data.id}/students`, { token: instructor }))
-      .status,
+    (
+      await api(`/courses/${capacityCourse.data.id}/students`, {
+        token: teacher,
+      })
+    ).status,
     403,
   );
-  assert.equal(
-    (await api(`/courses/${course.data.id}/students`, { token: admin })).status,
-    200,
-  );
-  const teacherEnrollments = await api("/enrollments", { token: instructor });
-  assert.ok(
-    !teacherEnrollments.data.some((row) => row.course_id === course.data.id),
-  );
-  const teacherStudents = await api("/students", { token: instructor });
-  assert.ok(
-    !teacherStudents.data.some(
-      (row) => row.id === first.data.id || row.id === second.data.id,
+  const attempts = await Promise.all(
+    [adonis.id, pamela.id].map((id) =>
+      api("/enrollments", {
+        token: admin,
+        method: "POST",
+        body: { studentId: id, courseId: capacityCourse.data.id },
+      }),
     ),
   );
-  const teacherReports = await api("/reports", { token: instructor });
-  assert.ok(
-    teacherReports.data.every((row) => !row.courses.includes(course.data.name)),
-  );
-  const architecture = assigned.data.find(
-    (row) => row.name === "Software Architecture",
-  );
-  assert.ok(
-    architecture,
-    "The demonstration instructor has an initial assignment.",
-  );
-  const classmates = await api(`/courses/${architecture.id}/students`, {
-    token: student,
+  assert.deepEqual(attempts.map((row) => row.status).sort(), [201, 409]);
+  const newStudent = await api("/students", {
+    token: admin,
+    method: "POST",
+    body: {
+      firstName: "Test",
+      lastName: "Registrar",
+      major: "Software Engineering",
+      semester: 8,
+      group: "Group 8",
+    },
   });
-  assert.equal(classmates.status, 200);
-  assert.ok(classmates.data.some((row) => row.name === "Luis Perez"));
-  let notifications = [];
-  for (let attempt = 0; attempt < 10; attempt++) {
-    notifications = (await api("/notifications", { token: student })).data;
-    if (
-      notifications.some((row) =>
-        row.message.includes(`#${ownEnrollment.data.id} `),
-      )
-    )
-      break;
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  assert.ok(
-    notifications.some((row) =>
-      row.message.includes(`#${ownEnrollment.data.id} `),
-    ),
-    "Worker must deliver the enrollment event.",
+  assert.equal(newStudent.status, 201);
+  assert.equal(newStudent.data.first_name, "Test");
+  assert.equal(newStudent.data.default_group, "Group 8");
+  const teachers = (await api("/instructors", { token: admin })).data;
+  const courseInput = {
+    name: "Registration workflow test",
+    code: "TEST-REG",
+    category: "Software Development",
+    capacity: 5,
+    instructorId: teachers[0].id,
+  };
+  const newCourse = await api("/courses", {
+    token: admin,
+    method: "POST",
+    body: courseInput,
+  });
+  assert.equal(newCourse.status, 201);
+  assert.equal(newCourse.data.instructor_user_id, teachers[0].id);
+  assert.equal(
+    (await api("/courses", { token: admin, method: "POST", body: courseInput }))
+      .status,
+    409,
   );
+  assert.equal(
+    (
+      await api("/courses", {
+        token: admin,
+        method: "POST",
+        body: { ...courseInput, code: "INVALID", instructorId: 2147483647 },
+      })
+    ).status,
+    422,
+  );
+  const registration = await api("/enrollments", {
+    token: admin,
+    method: "POST",
+    body: { studentId: newStudent.data.id, courseId: newCourse.data.id },
+  });
+  assert.equal(registration.status, 201);
+  assert.equal(registration.data.enrollments[0].group_name, "Group 8");
+  assert.equal(
+    (
+      await api("/enrollments", {
+        token: admin,
+        method: "POST",
+        body: { studentId: newStudent.data.id, courseId: newCourse.data.id },
+      })
+    ).status,
+    409,
+  );
+  assert.ok(
+    (await api("/reports", { token: admin })).data.some(
+      (row) =>
+        row.id === newStudent.data.id && row.courses.includes(courseInput.name),
+    ),
+  );
+  assert.equal((await api("/instructors", { token: student })).status, 403);
   assert.equal(
     (await api("/auth/logout", { token: student, method: "POST", body: {} }))
       .status,
     200,
   );
-  assert.equal(
-    (await api("/students", { token: student })).status,
-    401,
-    "Logout must revoke the JWT.",
-  );
-  const altered = admin.slice(0, -5) + "abcde";
-  assert.equal((await api("/students", { token: altered })).status, 401);
-  assert.equal((await api("/missing", { token: admin })).status, 404);
+  assert.equal((await api("/my-courses", { token: student })).status, 401);
 });

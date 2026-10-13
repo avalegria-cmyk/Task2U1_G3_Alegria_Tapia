@@ -1,62 +1,74 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { request, post, setToken } from "./api";
-import { Field, Table, Panel } from "./components";
-import "./styles.css";
-import { MyCourses, CourseRoster, InstructorAssignment } from "./CourseViews";
-
+import { request, post, setToken } from "./services/api";
+import { Layout } from "./layouts/Layout";
+import { Icon } from "./components/UI";
+import { Courses } from "./pages/Courses";
+import Enrollment from "./pages/Enrollment";
+import Notifications from "./pages/Notifications";
+import "./styles/app.css";
+import Dashboard from "./pages/Dashboard";
+import Students from "./pages/Students";
+import Reports from "./pages/Reports";
+const emptyData = () => ({
+  courses: [],
+  students: [],
+  enrollments: [],
+  notifications: [],
+  instructors: [],
+});
 function App() {
+  const [registering, setRegistering] = useState(false);
   const [user, setUser] = useState(null);
-  const [data, setData] = useState({
-    students: [],
-    courses: [],
-    enrollments: [],
-    reports: [],
-    notifications: [],
-    myCourses: [],
-    instructors: [],
-  });
-  const [tab, setTab] = useState("students");
-  const [courseId, setCourseId] = useState("");
-  const [search, setSearch] = useState("");
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
+  const [module, setModule] = useState("courses");
+  const [data, setData] = useState(emptyData);
+  const [selectedId, setSelectedId] = useState(null);
+  const [participants, setParticipants] = useState([]);
+  const [rosterLoading, setRosterLoading] = useState(false);
   const [busy, setBusy] = useState(false);
-  const clearSession = () => {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const session = useRef(0);
+  const rosterRequest = useRef(0);
+  function clearSession() {
+    session.current++;
+    rosterRequest.current++;
     setToken(null);
     setUser(null);
-    setData({
-      students: [],
-      courses: [],
-      enrollments: [],
-      reports: [],
-      notifications: [],
-      myCourses: [],
-      instructors: [],
-    });
-  };
-  async function refresh() {
-    const endpoints = {
-      students: "/students",
-      courses: "/courses",
-      enrollments: "/enrollments",
-      reports: "/reports",
-      notifications: "/notifications",
-      myCourses: "/my-courses",
-    };
-    if (user.role === "admin") endpoints.instructors = "/instructors";
-    const entries = await Promise.all(
-      Object.entries(endpoints).map(async ([key, path]) => [
-        key,
-        await request(path),
-      ]),
-    );
-    setData({ instructors: [], ...Object.fromEntries(entries) });
+    setData(emptyData());
+    setParticipants([]);
+    setSelectedId(null);
   }
-
   function handleError(cause) {
     setError(cause.message);
     if (cause.status === 401) clearSession();
+  }
+  async function refresh(account = user) {
+    const version = session.current;
+    const paths = {
+      courses: account.role === "admin" ? "/courses" : "/my-courses",
+      notifications: "/notifications",
+    };
+    if (account.role === "admin")
+      Object.assign(paths, {
+        students: "/students",
+        enrollments: "/enrollments",
+        instructors: "/instructors",
+      });
+    setLoading(true);
+    try {
+      const entries = await Promise.all(
+        Object.entries(paths).map(async ([key, path]) => [
+          key,
+          await request(path),
+        ]),
+      );
+      if (session.current === version)
+        setData({ ...emptyData(), ...Object.fromEntries(entries) });
+    } finally {
+      if (session.current === version) setLoading(false);
+    }
   }
   useEffect(() => {
     if (user) refresh().catch(handleError);
@@ -65,15 +77,16 @@ function App() {
     event.preventDefault();
     setBusy(true);
     setError("");
-    setMessage("");
     try {
-      const credentials = Object.fromEntries(new FormData(event.currentTarget));
-      const session = await post("/auth/login", credentials);
-      setToken(session.token);
-      setCourseId("");
-      setSearch("");
-      setTab(session.user.role === "admin" ? "enrollments" : "myCourses");
-      setUser(session.user);
+      const result = await post(
+        "/auth/login",
+        Object.fromEntries(new FormData(event.currentTarget)),
+      );
+      setToken(result.token);
+      session.current++;
+      setUser(result.user);
+      setModule(result.user.role === "admin" ? "dashboard" : "courses");
+      setMessage("");
     } catch (cause) {
       handleError(cause);
     } finally {
@@ -82,408 +95,245 @@ function App() {
   }
   async function logout() {
     setBusy(true);
-    setError("");
     try {
       await post("/auth/logout", {});
       clearSession();
-      setMessage("");
     } catch (cause) {
       handleError(cause);
     } finally {
       setBusy(false);
     }
   }
-  async function submit(event, resource, numericFields = []) {
-    event.preventDefault();
-    const form = event.currentTarget;
+  async function openCourse(course) {
+    const id = ++rosterRequest.current;
+    setSelectedId(course.id);
+    setParticipants([]);
+    setRosterLoading(true);
+    setError("");
+    setMessage("");
+    try {
+      await post(`/courses/${course.id}/access`, {});
+      const rows = await request(`/courses/${course.id}/students`);
+      if (id === rosterRequest.current) setParticipants(rows);
+    } catch (cause) {
+      if (id === rosterRequest.current) handleError(cause);
+    } finally {
+      if (id === rosterRequest.current) setRosterLoading(false);
+    }
+  }
+  async function mutate(action, success) {
     setBusy(true);
     setError("");
     setMessage("");
-    const values = Object.fromEntries(new FormData(form));
-    numericFields.forEach((key) => {
-      if (key in values) values[key] = Number(values[key]);
-    });
     try {
-      await post(`/${resource}`, values);
-      form.reset();
-      setMessage("Record saved successfully.");
+      await action();
       await refresh();
+      setMessage(success);
+      return true;
     } catch (cause) {
       handleError(cause);
+      return false;
     } finally {
       setBusy(false);
     }
   }
-  const button = (
-    <button disabled={busy} className="primary">
-      {busy ? "Saving…" : "Save record"}
-    </button>
+  function navigate(value) {
+    rosterRequest.current++;
+    setModule(value);
+    setRegistering(false);
+    setSelectedId(null);
+    setParticipants([]);
+    setError("");
+    setMessage("");
+  }
+  const selectedCourse = data.courses.find(
+    (course) => course.id === selectedId,
   );
   if (!user)
     return (
-      <main className="flex min-h-screen items-center justify-center bg-slate-950 p-6">
-        <section className="w-full max-w-md rounded-3xl bg-white p-8 shadow-xl">
-          <p className="mb-4 text-xs font-bold uppercase tracking-[.2em] text-teal-700">
-            University portal
+      <main className="login-page">
+        <section className="login-card">
+          <span className="mb-5 inline-flex rounded-2xl bg-blue-600 p-4 text-white">
+            <Icon name="courses" className="h-8 w-8" />
+          </span>
+          <p className="text-xs font-bold tracking-[.2em] text-blue-600">
+            UNIVERSITY
           </p>
-          <h1 className="text-3xl font-bold">Academic Manager</h1>
-          <p className="mt-3 mb-7 text-slate-500">
-            Sign in to manage your academic information.
+          <h1 className="mt-2 text-3xl font-bold text-gray-800">
+            Academic portal
+          </h1>
+          <p className="mt-3 mb-7 text-sm text-gray-500">
+            Sign in to access your courses and notifications.
           </p>
-          <form onSubmit={login} className="grid gap-4">
-            <Field
-              label="Email address"
-              name="email"
-              type="email"
-              autoComplete="username"
-              maxLength={150}
-            />
-            <Field
-              label="Password"
-              name="password"
-              type="password"
-              autoComplete="current-password"
-            />
+          <form className="space-y-4" onSubmit={login}>
+            <label className="field">
+              Email address
+              <input
+                name="email"
+                type="email"
+                required
+                autoComplete="username"
+              />
+            </label>
+            <label className="field">
+              Password
+              <input
+                name="password"
+                type="password"
+                required
+                autoComplete="current-password"
+              />
+            </label>
             {error && (
-              <p role="alert" className="text-red-700">
+              <p role="alert" className="text-sm text-red-600">
                 {error}
               </p>
             )}
-            <button disabled={busy} className="primary">
+            <button className="primary w-full" disabled={busy}>
               {busy ? "Signing in…" : "Sign in"}
             </button>
           </form>
-          <p className="mt-6 text-xs text-slate-500">
-            Demo account details are available in the project README.
+          <p className="mt-6 text-center text-xs text-gray-400">
+            University Academic Management
           </p>
         </section>
       </main>
     );
-  const tabs =
-    user.role === "admin"
-      ? [
-          ["enrollments", "Student enrollment"],
-          ["rosters", "Enrolled students"],
-          ["students", "Students"],
-          ["courses", "Courses & assignments"],
-          ["reports", "Reports"],
-          ["notifications", "Notifications"],
-        ]
-      : [
-          [
-            "myCourses",
-            user.role === "instructor" ? "Assigned courses" : "My courses",
-          ],
-          ["rosters", "Enrolled students"],
-          ["notifications", "Notifications"],
-        ];
-  const rosterCourses = user.role === "admin" ? data.courses : data.myCourses;
-  const filtered = (data[tab] || []).filter((row) =>
-    JSON.stringify(row).toLowerCase().includes(search.toLowerCase()),
-  );
-  async function assignInstructor(event) {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const values = Object.fromEntries(new FormData(form));
-    setBusy(true);
-    setError("");
-    setMessage("");
-    try {
-      await post(`/courses/${values.courseId}/instructor`, {
-        instructorId: Number(values.instructorId),
-      });
-      form.reset();
-      await refresh();
-      setMessage("Instructor assigned successfully.");
-    } catch (cause) {
-      handleError(cause);
-    } finally {
-      setBusy(false);
-    }
-  }
   return (
-    <div className="min-h-screen">
-      <header className="bg-slate-950 text-white">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-6 py-7">
-          <div>
-            <p className="text-xs uppercase tracking-[.2em] text-teal-300">
-              University portal
-            </p>
-            <h1 className="mt-1 text-2xl font-bold">Academic Manager</h1>
-          </div>
-          <div className="flex items-center gap-5">
-            <div className="text-right text-sm">
-              <p>{user.name}</p>
-              <p className="capitalize text-slate-400">{user.role}</p>
-            </div>
-            <button
-              onClick={logout}
-              disabled={busy}
-              className="rounded-lg border border-slate-600 px-4 py-2 text-sm"
-            >
-              Sign out
-            </button>
-          </div>
-        </div>
-      </header>
-      <main className="mx-auto max-w-7xl space-y-6 px-6 py-8">
-        <div>
-          <h2 className="text-2xl font-bold">
-            {user.role === "admin"
-              ? "Administration"
-              : user.role === "instructor"
-                ? "Teaching overview"
-                : "My studies"}
-          </h2>
-          <p className="mt-1 text-slate-500">
-            {user.role === "admin"
-              ? "Manage student enrollments, teaching assignments, and class rosters."
-              : user.role === "instructor"
-                ? "Your assigned courses and the students enrolled in them."
-                : "Your enrolled courses and classmates, in one place."}
-          </p>
-        </div>
-        <div className="grid gap-4 sm:grid-cols-3">
-          {(user.role === "admin"
-            ? [
-                ["students", "Students"],
-                ["courses", "Courses"],
-                ["enrollments", "Enrollments"],
-              ]
-            : [
-                [
-                  "myCourses",
-                  user.role === "instructor"
-                    ? "Assigned courses"
-                    : "Enrolled courses",
-                ],
-                ["notifications", "Notifications"],
-              ]
-          ).map(([key, label]) => (
-            <div
-              key={key}
-              className="rounded-2xl border border-slate-200 bg-white p-5"
-            >
-              <p className="text-sm capitalize text-slate-500">{label}</p>
-              <p className="mt-2 text-3xl font-bold">{data[key].length}</p>
-            </div>
-          ))}
-        </div>
-        <nav aria-label="Academic sections" className="flex flex-wrap gap-2">
-          {tabs.map(([key, label]) => (
-            <button
-              key={key}
-              aria-current={tab === key ? "page" : undefined}
-              onClick={() => {
-                setTab(key);
-                setSearch("");
-                setError("");
-                setMessage("");
-              }}
-              className={`rounded-lg px-4 py-2 text-sm font-medium capitalize ${tab === key ? "bg-teal-700 text-white" : "bg-white text-slate-600 hover:bg-slate-200"}`}
-            >
-              {label}
-            </button>
-          ))}
-        </nav>
-        {error && (
-          <p role="alert" className="rounded-lg bg-red-50 p-4 text-red-800">
-            {error}
-          </p>
-        )}
-        {message && (
-          <p role="status" className="rounded-lg bg-teal-50 p-4 text-teal-800">
-            {message}
-          </p>
-        )}
-        {tab === "myCourses" && (
-          <MyCourses
-            courses={data.myCourses}
-            role={user.role}
-            onOpenRoster={(id) => {
-              setCourseId(String(id));
-              setTab("rosters");
-            }}
-          />
-        )}
-        {tab === "rosters" && (
-          <CourseRoster
-            courses={rosterCourses}
-            courseId={courseId}
-            onSelectCourse={setCourseId}
-            onError={handleError}
-          />
-        )}
-        {tab === "courses" && user.role === "admin" && (
-          <InstructorAssignment
-            courses={data.courses}
-            instructors={data.instructors}
-            busy={busy}
-            onAssign={assignInstructor}
-          />
-        )}
-        {tab === "students" && user.role === "admin" && (
-          <Panel title="Add a student">
-            <form
-              className="form-grid"
-              onSubmit={(event) => submit(event, "students", ["semester"])}
-            >
-              <Field label="Full name" name="name" maxLength={120} />
-              <Field label="Major" name="major" maxLength={120} />
-              <Field
-                label="Semester"
-                name="semester"
-                type="number"
-                min="1"
-                max="12"
-              />
-              {button}
-            </form>
-          </Panel>
-        )}
-        {tab === "courses" && user.role === "admin" && (
-          <Panel title="Add a course">
-            <form
-              className="form-grid"
-              onSubmit={(event) => submit(event, "courses", ["capacity"])}
-            >
-              <Field label="Course name" name="name" maxLength={120} />
-              <Field label="Instructor" name="instructor" maxLength={120} />
-              <Field
-                label="Capacity"
-                name="capacity"
-                type="number"
-                min="1"
-                max="1000"
-              />
-              {button}
-            </form>
-          </Panel>
-        )}
-        {tab === "enrollments" && user.role === "admin" && (
-          <Panel title="Enroll a student">
-            <form
-              className="form-grid"
-              onSubmit={(event) =>
-                submit(event, "enrollments", ["studentId", "courseId"])
-              }
-            >
-              {user.role === "admin" && (
-                <label className="select-label">
-                  Student
-                  <select name="studentId" required defaultValue="">
-                    <option value="" disabled>
-                      Select a student
-                    </option>
-                    {data.students.map((student) => (
-                      <option key={student.id} value={student.id}>
-                        {student.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-              <label className="select-label">
-                Course
-                <select name="courseId" required defaultValue="">
-                  <option value="" disabled>
-                    Select a course
-                  </option>
-                  {data.courses.map((course) => (
-                    <option
-                      key={course.id}
-                      value={course.id}
-                      disabled={course.enrolled >= course.capacity}
-                    >
-                      {course.name} ({course.capacity - course.enrolled} seats
-                      left)
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {button}
-            </form>
-          </Panel>
-        )}
-        {!["myCourses", "rosters"].includes(tab) && (
-          <Panel
-            title={
-              {
-                students: "Student directory",
-                courses: "Course catalog",
-                enrollments: "Enrollment records",
-                reports: "Academic reports",
-                notifications: "Enrollment notifications",
-              }[tab]
-            }
-          >
-            <div className="mb-4 flex flex-wrap items-end gap-3">
-              <Field
-                label="Search records"
-                type="search"
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                required={false}
-              />
-              <button
-                className="rounded-lg border border-slate-300 px-4 py-2 text-sm"
-                disabled={busy}
-                onClick={async () => {
-                  setBusy(true);
-                  setError("");
-                  try {
-                    await refresh();
-                  } catch (cause) {
-                    handleError(cause);
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
-              >
-                Refresh
-              </button>
-            </div>
-            <Table
-              rows={filtered}
-              columns={
-                {
-                  students: [
-                    ["id", "ID"],
-                    ["name", "Name"],
-                    ["major", "Major"],
-                    ["semester", "Semester"],
-                  ],
-                  courses: [
-                    ["id", "ID"],
-                    ["name", "Course"],
-                    ["instructor", "Instructor"],
-                    ["capacity", "Capacity"],
-                    ["enrolled", "Enrolled"],
-                  ],
-                  enrollments: [
-                    ["id", "ID"],
-                    ["student", "Student"],
-                    ["course", "Course"],
-                  ],
-                  reports: [
-                    ["name", "Student"],
-                    ["major", "Major"],
-                    ["courses", "Courses"],
-                  ],
-                  notifications: [
-                    ["message", "Message"],
-                    ["created_at", "Created at"],
-                  ],
-                }[tab]
-              }
-            />
-          </Panel>
-        )}
-        <footer className="text-xs text-slate-500">
-          Software Architecture · University Academic Manager
-        </footer>
-      </main>
-    </div>
+    <Layout
+      user={user}
+      module={module}
+      onNavigate={navigate}
+      unread={data.notifications.filter((row) => !row.read_at).length}
+      busy={busy || loading}
+      onLogout={logout}
+      onRefresh={() => {
+        setError("");
+        refresh()
+          .then(() => selectedCourse && openCourse(selectedCourse))
+          .catch(handleError);
+      }}
+    >
+      {error && (
+        <p
+          role="alert"
+          className="mb-5 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700"
+        >
+          {error}
+        </p>
+      )}
+      {message && (
+        <p
+          role="status"
+          className="mb-5 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-700"
+        >
+          {message}
+        </p>
+      )}
+      {loading && (
+        <p role="status" className="mb-4 text-sm text-gray-500">
+          Refreshing data…
+        </p>
+      )}
+      {user.role === "admin" && module === "dashboard" && (
+        <Dashboard
+          data={data}
+          user={user}
+          onNavigate={navigate}
+          onRegister={() => {
+            navigate("enrollment");
+            setRegistering(true);
+          }}
+        />
+      )}
+      {user.role === "admin" && module === "students" && (
+        <Students
+          students={data.students}
+          busy={busy}
+          onCreate={(values) =>
+            mutate(
+              () => post("/students", values),
+              "Student registered successfully.",
+            )
+          }
+        />
+      )}
+      {user.role === "admin" && module === "reports" && <Reports {...data} />}
+      {(module === "courses" ||
+        (module === "rosters" && user.role === "admin")) && (
+        <Courses
+          key={module}
+          rosterOnly={module === "rosters"}
+          onCreate={(values) =>
+            mutate(
+              () => post("/courses", values),
+              "Course registered successfully.",
+            )
+          }
+          courses={data.courses}
+          user={user}
+          selectedCourse={selectedCourse}
+          participants={participants}
+          loading={rosterLoading}
+          onOpen={openCourse}
+          onBack={() => {
+            rosterRequest.current++;
+            setSelectedId(null);
+            setParticipants([]);
+          }}
+          instructors={data.instructors}
+          busy={busy}
+          onAssign={(event) => {
+            event.preventDefault();
+            const form = new FormData(event.currentTarget);
+            mutate(async () => {
+              await post(`/courses/${selectedId}/instructor`, {
+                instructorId: Number(form.get("instructorId")),
+              });
+              await openCourse(selectedCourse);
+            }, "Instructor assigned successfully.");
+          }}
+        />
+      )}
+      {module === "notifications" && (
+        <Notifications
+          rows={data.notifications}
+          busy={busy}
+          onRead={(id) =>
+            mutate(
+              () => post(`/notifications/${id}/read`, {}),
+              "Notification marked as read.",
+            )
+          }
+        />
+      )}
+      {module === "enrollment" && user.role === "admin" && (
+        <Enrollment
+          courses={data.courses}
+          students={data.students}
+          enrollments={data.enrollments}
+          busy={busy}
+          registering={registering}
+          onRegister={() => {
+            setMessage("");
+            setError("");
+            setRegistering(true);
+          }}
+          onCancel={() => {
+            setRegistering(false);
+            setError("");
+          }}
+          onEnroll={async (courseId, studentId) => {
+            const success = await mutate(
+              () => post("/enrollments", { courseId, studentId }),
+              "Enrollment registered successfully.",
+            );
+            if (success) setRegistering(false);
+            return success;
+          }}
+        />
+      )}
+    </Layout>
   );
 }
 createRoot(document.getElementById("root")).render(<App />);

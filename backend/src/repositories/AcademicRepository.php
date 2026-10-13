@@ -1,6 +1,6 @@
 <?php
 declare(strict_types=1);
-namespace App;
+namespace App\repositories;
 use PDO;
 final class AcademicRepository
 {
@@ -10,6 +10,15 @@ final class AcademicRepository
         $statement = $this->db->prepare($sql);
         $statement->execute($parameters);
         return $statement->fetchAll();
+    }
+    public function insertStudent(string $name, string $first, string $last, string $major, int $semester, ?string $group): array {
+        return $this->query('INSERT INTO students(name, first_name, last_name, major, semester, default_group) VALUES (?,?,?,?,?,?) RETURNING *', [$name, $first, $last, $major, $semester, $group])[0];
+    }
+    public function findInstructor(int $id): ?array {
+        return $this->query("SELECT id,name FROM users WHERE id=? AND role='instructor'", [$id])[0] ?? null;
+    }
+    public function insertCourse(string $name, string $instructor, int $capacity, ?int $instructorId, ?string $code, ?string $category): array {
+        return $this->query('INSERT INTO courses(name,instructor,capacity,instructor_user_id,code,category) VALUES (?,?,?,?,?,?) RETURNING *', [$name,$instructor,$capacity,$instructorId,$code,$category])[0];
     }
     public function students(?int $studentId): array
     {
@@ -33,7 +42,7 @@ final class AcademicRepository
             $parameters = [$user["student_id"]];
         }
         return $this->query(
-            "SELECT c.id, c.name, c.capacity, c.instructor_user_id, COALESCE(u.name,c.instructor) AS instructor, (SELECT count(*)::int FROM enrollments e WHERE e.course_id=c.id) AS enrolled FROM courses c LEFT JOIN users u ON u.id=c.instructor_user_id" .
+            "SELECT c.id, c.code, c.name, c.category, c.capacity, c.instructor_user_id, COALESCE(u.name,c.instructor) AS instructor, (SELECT count(*)::int FROM enrollments e WHERE e.course_id=c.id) AS enrolled FROM courses c LEFT JOIN users u ON u.id=c.instructor_user_id" .
                 $where .
                 " ORDER BY c.id",
             $parameters,
@@ -56,7 +65,7 @@ final class AcademicRepository
         ?int $instructorId = null,
     ): array {
         return $this->query(
-            "SELECT e.id, e.student_id, e.course_id, s.name AS student, c.name AS course FROM enrollments e JOIN students s ON s.id=e.student_id JOIN courses c ON c.id=e.course_id" .
+            "SELECT e.id, e.student_id, e.course_id, e.group_name, s.name AS student, c.name AS course FROM enrollments e JOIN students s ON s.id=e.student_id JOIN courses c ON c.id=e.course_id" .
                 ($studentId !== null
                     ? " WHERE e.student_id=?"
                     : ($instructorId !== null

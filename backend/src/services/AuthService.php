@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
-namespace App;
+namespace App\services;
+use App\middlewares\HttpError;
+use App\repositories\AcademicRepository;
 use Firebase\JWT\JWT;
 use Firebase\JWT\Key;
 final class AuthService
@@ -39,6 +41,7 @@ final class AuthService
                 "iat" => $now,
                 "exp" => $now + 3600,
                 "jti" => bin2hex(random_bytes(16)),
+                "version" => (int) $user["session_version"],
             ],
             $this->secret,
             "HS256",
@@ -74,10 +77,13 @@ final class AuthService
         }
         $user =
             $this->repository->query(
-                "SELECT id, name, email, role, student_id FROM users WHERE id=?",
+                "SELECT id, name, email, role, student_id, session_version FROM users WHERE id=?",
                 [$claims->sub],
             )[0] ?? null;
-        if (!$user) {
+        if (
+            !$user ||
+            (int) ($claims->version ?? 0) !== (int) $user["session_version"]
+        ) {
             throw new HttpError(401, "Account not found.");
         }
         return $user + [
