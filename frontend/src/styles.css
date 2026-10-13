@@ -1,0 +1,26 @@
+@import "tailwindcss";
+@layer base {
+  body {
+    @apply m-0 bg-slate-50 font-sans text-slate-900 antialiased;
+  }
+  button {
+    @apply cursor-pointer disabled:cursor-wait disabled:opacity-50;
+  }
+  button:focus-visible {
+    @apply outline-2 outline-offset-2 outline-teal-600;
+  }
+}
+@layer components {
+  .primary {
+    @apply rounded-lg bg-teal-700 px-5 py-2.5 font-medium text-white hover:bg-teal-800;
+  }
+  .form-grid {
+    @apply grid items-end gap-4 md:grid-cols-2 xl:grid-cols-4;
+  }
+  .select-label {
+    @apply grid gap-1 text-sm font-medium text-slate-600;
+  }
+  select {
+    @apply w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900;
+  }
+}

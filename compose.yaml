@@ -1,0 +1,81 @@
+name: university-academic-manager
+x-backend: &backend
+  build:
+    context: .
+    dockerfile: docker/backend.Dockerfile
+  environment: &environment
+    POSTGRES_DB: ${POSTGRES_DB:-academic_manager}
+    POSTGRES_USER: ${POSTGRES_USER:-academic_app}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+  depends_on:
+    database:
+      condition: service_healthy
+services:
+  database:
+    image: postgres:18.6-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-academic_manager}
+      POSTGRES_USER: ${POSTGRES_USER:-academic_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - academic_data:/var/lib/postgresql
+      - ./database/001-schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
+  migrate:
+    <<: *backend
+    command: [php, bin/migrate.php]
+  api:
+    <<: *backend
+    depends_on: &ready
+      database:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  worker:
+    <<: *backend
+    depends_on: *ready
+    command: [php, bin/worker.php]
+    restart: unless-stopped
+  seed:
+    <<: *backend
+    depends_on: *ready
+    profiles: [tools]
+    environment:
+      <<: *environment
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-}
+    command: [php, bin/seed.php]
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    ports:
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8080}:80"
+    depends_on:
+      - api
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1/api/health]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+  test:
+    image: node:24.21-alpine
+    profiles: [tools]
+    environment:
+      BASE_URL: http://web
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-}
+    volumes:
+      - ./tests:/tests:ro
+    command: [node, --test, /tests/api.test.mjs]
+    depends_on:
+      web:
+        condition: service_healthy
+volumes:
+  academic_data:
